@@ -8,7 +8,7 @@ This repository contains an implementation of the Neural Lens Modeling paper. Th
 - [Requirements](#requirements)
 - [Installation](#installation)
 - [Dataset Generation](#dataset-generation)
-- [Training Networks](#training-networks)
+- [NeuroLens Optimization](#training-networks)
 - [License](#license)
 
 ## Introduction
@@ -53,16 +53,17 @@ To generate a dataset for training the neural networks, follow these steps:
 
 The dataset generation process requires the keypoint detection module to accurately estimate the blur parameters.
 ```
-cd SyLens
+cd SynLens
 python import_lenses.py
 ```
 
-## Training Networks for Calibration
+## Optimizing NeuroLens for Calibration
 
 To train the neural networks using the generated dataset, follow these steps:
 
 1. Load the dataset of blurred images and blur parameters (JSON files).
 2. Split the dataset into training and validation sets.
+3. Run calibration.
 
 ```
 cd calibration/scripts
