@@ -15,8 +15,9 @@ This repository contains an implementation of the Neural Lens Modeling paper. Th
 
 We introduce NeuroLens, a new method that accurately optimizes for camera lens distortion using an invertible neural network. Compared to standard calibration packages, NeuroLens improves the accuracy and generality of pre-capture camera calibration and allows for refinement during 3D reconstruction.
 
-Paper: https://arxiv.org/abs/2304.04848
-Project website: https://neural-lens.github.io
+[Paper]: https://arxiv.org/abs/2304.04848
+[Project website]: https://neural-lens.github.io
+
 The implementation provides tools for keypoint detection, dataset generation, and training the networks.
 
 - Keypoint detection: The implementation includes our method to detect keypoints in images and to generate new keypoint patterns to be detected more accurately.
