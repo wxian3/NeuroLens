@@ -18,26 +18,16 @@ We introduce NeuroLens, a new method that accurately optimizes for camera lens d
 [Paper]: https://arxiv.org/abs/2304.04848
 [Project website]: https://neural-lens.github.io
 
-The implementation provides tools for keypoint detection, dataset generation, and training the networks.
-
-- Keypoint detection: The implementation includes our method to detect keypoints in images and to generate new keypoint patterns to be detected more accurately.
-- Dataset generation: Tools are provided to generate a dataset of input images and corresponding ground truth lens parameters. This dataset can be used to train the neural networks.
-- Training networks: The implementation includes network architectures and training scripts to train the neural networks using the capture or generated dataset.
+This is a PyTorch implementation provides tools for keypoint detection, dataset generation, and training the networks.
 
 ## Requirements
 
-To use the Neural Lens Modeling implementation, you need the following dependencies:
-
-- Python (version 3.7 or higher)
-- TensorFlow (version 2.4 or higher)
-- OpenCV (version 4.2 or higher)
-- NumPy (version 1.19 or higher)
-- Matplotlib (version 3.3 or higher)
+To use the Neural Lens Modeling implementation, you need Python (version 3.7 or higher) and the following dependencies:
 
 You can install the required Python packages using pip:
 
 ```
-pip install tensorflow opencv-python numpy matplotlib
+pip install torch opencv-python numpy matplotlib
 ```
 
 ## Installation
@@ -52,21 +42,21 @@ git clone https://github.com/wxian3/neuroLens.git
 
 To generate a dataset for training the neural networks, follow these steps:
 
-1. Prepare a set of color images that will be used as input.
-2. Apply lens distortion effects to the distort images using various lens parameters.
-3. Save the distorted images along with the corresponding lens parameters (e.g., lens distortion, focal distance, aperture diameter) in a suitable format (e.g., CSV, JSON).
+1. Prepare a keypoint pattern that will be used as input.
+2. Apply lens distortion effects to the target markers using various lens parameters.
+3. Save the distorted images along with the corresponding lens parameters (e.g., lens distortion, focal distance, aperture diameter) in JSON.
 
-The dataset generation process requires the keypoint detection module to accurately estimate the blur parameters.
+The dataset generation process requires the keypoint detection module to accurately estimate the distortion parameters.
 ```
 cd SynLens
-python import_lenses.py
+python import_lenses.py --input_path path_to_target
 ```
 
 ## Optimizing NeuroLens for Calibration
 
 To train the neural networks using the generated dataset, follow these steps:
 
-1. Load the dataset of blurred images and blur parameters (JSON files).
+1. Load the sequence of distorted images and keypoint correspondences from JSON files.
 2. Split the dataset into training and validation sets.
 3. Run calibration.
 
