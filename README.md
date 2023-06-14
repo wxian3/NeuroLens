@@ -13,7 +13,11 @@ This repository contains an implementation of the Neural Lens Modeling paper. Th
 
 ## Introduction
 
-The Neural Lens Modeling project aims to simulate realistic lens blur effects using neural networks. By training the networks on a dataset of blurred and sharp images, the models learn to predict lens blur parameters based on input images. The implementation provides tools for keypoint detection, dataset generation, and training the networks.
+We introduce NeuroLens, a new method that accurately optimizes for camera lens distortion using an invertible neural network. Compared to standard calibration packages, NeuroLens improves the accuracy and generality of pre-capture camera calibration and allows for refinement during 3D reconstruction.
+
+Paper: https://arxiv.org/abs/2304.04848
+Project website: https://neural-lens.github.io
+The implementation provides tools for keypoint detection, dataset generation, and training the networks.
 
 - Keypoint detection: The implementation includes our method to detect keypoints in images and to generate new keypoint patterns to be detected more accurately.
 - Dataset generation: Tools are provided to generate a dataset of input images and corresponding ground truth lens parameters. This dataset can be used to train the neural networks.
