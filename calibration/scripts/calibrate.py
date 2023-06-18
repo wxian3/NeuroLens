@@ -1,16 +1,20 @@
-import torch
-import cv2
-import numpy as np
+import json
 import logging
 from os import path
+import cv2
 import hydra
 import imageio
-import json
+import numpy as np
+import torch
+import torchvision.transforms as transforms
 import tqdm
+from matplotlib import pyplot as plt
+from torch.nn import functional as F
+from torch.utils.tensorboard import SummaryWriter
 
-from ..config import Config
 from ..camera import Camera
-from ..networks import LensNet
+from ..config import Config
+from ..networks import iResNet, LensNet 
 from ..util import batched_func
 
 
@@ -28,7 +32,8 @@ def cli(cfg: Config):
     OpenCV model.
     """
     LOGGER.info("Loading detection data...")
-    storage_fp = path.abspath(path.join(CONF_FP, "..", "..", "data", "live"))
+    storage_fp = path.join("..", "..", "data/target")
+
     with open(path.join(storage_fp, "points.json"), "r") as inf:
         cam_info = json.load(inf)
     n_points = 0
@@ -62,76 +67,20 @@ def cli(cfg: Config):
     ) = cv2.calibrateCameraExtended(
         board_coords_val,
         frame_coords_val,
-        cam_info["resolution_wh"],
+        tuple(cam_info["resolution_wh"]),
         None,
         None,
         flags=cv2.CALIB_RATIONAL_MODEL,
     )
 
     LOGGER.info(f"Overall RMS reprojection error after initialization: {retval}.")
-    # for image_idx in range(len(board_coords)):
-    #     image = imageio.imread(
-    #         path.join(storage_fp, "%05d.png" % (image_idx * subs_fac))
-    #     )
-    #     cv2.imshow("image", image[:, :, ::-1])
-    #     resize_fac = 3
-    #     image = cv2.resize(
-    #         image, None, fx=resize_fac, fy=resize_fac, interpolation=cv2.INTER_LINEAR
-    #     )
-    #     for frame_coord, board_coord in zip(
-    #         frame_coords[image_idx], board_coords[image_idx]
-    #     ):
-    #         image[
-    #             int(frame_coord[1] * resize_fac)
-    #             - resize_fac : int(frame_coord[1] * resize_fac)
-    #             + resize_fac,
-    #             int(frame_coord[0] * resize_fac)
-    #             - resize_fac : int(frame_coord[0] * resize_fac)
-    #             + resize_fac,
-    #             1,
-    #         ] = 255
-    #         text = str("%d, %d" % (int(board_coord[0]), int(board_coord[1])))
-    #         text_width, text_height = cv2.getTextSize(
-    #             text, cv2.FONT_HERSHEY_SIMPLEX, 0.3, 1
-    #         )[0]
-    #         cv2.putText(
-    #             image,
-    #             text,
-    #             (
-    #                 int(frame_coord[0] * resize_fac),
-    #                 int(frame_coord[1] * resize_fac) - text_height,
-    #             ),
-    #             cv2.FONT_HERSHEY_SIMPLEX,
-    #             0.3,
-    #             (0, 255, 0),
-    #             1,
-    #         )
-    #     cv2.imshow("detections", image[:, :, ::-1])
-    #     proj = cv2.projectPoints(
-    #         board_coords[image_idx],
-    #         r_vecs_obj_to_cam[image_idx],
-    #         t_vecs_obj_to_cam[image_idx],
-    #         camera_matrix,
-    #         dist_coeffs,
-    #     )[0][:, 0, :]
-    #     for frame_coord in proj:
-    #         image[
-    #             int(frame_coord[1] * resize_fac)
-    #             - resize_fac : int(frame_coord[1] * resize_fac)
-    #             + resize_fac,
-    #             int(frame_coord[0] * resize_fac)
-    #             - resize_fac : int(frame_coord[0] * resize_fac)
-    #             + resize_fac,
-    #             0,
-    #         ] = 255
-    #     cv2.imshow("projected", image[:, :, ::-1])
-    #     cv2.waitKey(0)
 
     LOGGER.info("Initializing lens net...")
     RTs_val = []
     dev = torch.device("cuda")
-    lens_net = LensNet().to(dev)
-    # lens_net = None
+    lens_net = iResNet().to(dev)
+    iResNet().test_inverse()
+
     K = torch.from_numpy(camera_matrix).to(torch.float32).to(dev).requires_grad_()
     cams_val = []
     residuals_val = []
@@ -153,17 +102,12 @@ def cli(cfg: Config):
             r_vecs_obj_to_cam[cam_idx],
             t_vecs_obj_to_cam[cam_idx],
             camera_matrix,
-            np.zeros_like(dist_coeffs),
+            dist_coeffs,
         )[0][:, 0, :]
         residuals_val.append(
             np.square(np.linalg.norm(frame_coords_val[cam_idx] - proj_opencv, axis=1))
         )
-        # proj_calib = cams[-1].project_points(
-        #     torch.from_numpy(board_coords[cam_idx]).to(torch.float32).to(dev)
-        # )
-        # proj_calib = proj_calib.detach().cpu().numpy()
-        # import pdb
-        # pdb.set_trace()
+
     RMSE_opencv_val = np.sqrt(np.mean(np.concatenate(residuals_val, axis=0)))
     LOGGER.info(f"RMSE OpenCV: {RMSE_opencv_val}")
     LOGGER.info("Assembling training set...")
@@ -205,68 +149,220 @@ def cli(cfg: Config):
     LOGGER.info(
         f"Using {n_points_train} points for training from {n_frames_train} frames."
     )
+
     LOGGER.info("Setting up optimizer...")
+    scale = torch.nn.Parameter(torch.tensor(1.305)).requires_grad_()
     optimizer_train = torch.optim.Adam(
         [
             K,
         ]
         + list(lens_net.parameters())
-        + RTs_train,
+        + RTs_train
+        + [scale],
         lr=1e-4,
     )
     optimizer_val_RT = torch.optim.Adam(
         RTs_val,
         lr=1e-4,
     )
+
+    if is_eval:
+        PATH = log_dir + "/lensnet_latest.pt"
+        checkpoint = torch.load(PATH)
+        lens_net.load_state_dict(checkpoint["model_state_dict"])
+        optimizer_train.load_state_dict(checkpoint["optimizer_state_dict"])
+        RTs_train = checkpoint["RTs_train"]
+        RTs_val = checkpoint["RTs_train"]
+        K = checkpoint["K"]
+
+        loss_vals = []
+        rows, cols = 3, 4
+        gridspec_kw = {"wspace": 0.0, "hspace": 0.0}
+        fig, axarr = plt.subplots(rows, cols, gridspec_kw=gridspec_kw, figsize=(12, 9))
+        bleed = 0
+        fig.subplots_adjust(
+            left=bleed, bottom=bleed, right=(1 - bleed), top=(1 - bleed)
+        )
+        for cam_idx, (cam, board_coord_mat, frame_coord_mat, ax) in enumerate(
+            zip(cams_val, board_coords_val, frame_coords_val, axarr.ravel())
+        ):
+            board_coord_mat = (
+                torch.from_numpy(board_coord_mat).to(torch.float32).to(dev)
+            )
+            frame_coord_mat = (
+                torch.from_numpy(frame_coord_mat).to(torch.float32).to(dev)
+            )
+            projected = cam.project_points(board_coord_mat)
+            val_error = torch.square(
+                torch.linalg.norm(projected - frame_coord_mat, dim=1)
+            )  # RMSE
+            loss_vals.append(val_error.detach().clone())
+            # visualize keypoints
+            vis, camera_directions_w_lens = vis_lens(cam)
+            # ax.imshow(vis[..., :3])
+            ax.scatter(
+                projected.detach().cpu().numpy()[:, 0],
+                projected.detach().cpu().numpy()[:, 1],
+                marker="o",
+                s=5,
+            )
+            ax.scatter(
+                frame_coord_mat.detach().cpu().numpy()[:, 0],
+                frame_coord_mat.detach().cpu().numpy()[:, 1],
+                marker="o",
+                s=5,
+            )
+            ax.set_xlim((0, 512))
+            ax.set_ylim((0, 512))
+            ax.set_axis_off()
+
+        fig.savefig(log_dir + "/vis_eval.png")
+        plt.close(fig)
+
+        rows, cols = 1, 4
+        gridspec_kw = {"wspace": 0.0, "hspace": 0.0}
+        fig, axarr = plt.subplots(rows, cols, gridspec_kw=gridspec_kw, figsize=(12, 3))
+        bleed = 0
+        fig.subplots_adjust(
+            left=bleed, bottom=bleed, right=(1 - bleed), top=(1 - bleed)
+        )
+
+        vis, camera_directions_w_lens = vis_lens(cams_val[0])
+        target_board_ABC = (
+            imageio.imread(path.join(storage_fp, "target_rainbow_ABC.png"))[..., :3]
+            / 255.0
+        )
+        target_board_path = path.join(storage_fp, "target_rainbow.png")
+        target_board = imageio.imread(target_board_path)[..., :3]
+        transform = transforms.ToTensor()
+        image = transform(target_board).unsqueeze(0).to(dev)
+        flow = camera_directions_w_lens.unsqueeze(0).to(dev) * 1.305
+        output = F.grid_sample(
+            image, flow, mode="bilinear", padding_mode="zeros", align_corners=False
+        )
+        output_img = output[0].permute(1, 2, 0).cpu().numpy()
+        axarr[0].imshow(target_board)
+        axarr[1].imshow(output_img)
+        axarr[2].imshow(target_board_ABC)
+
+        def rgb2gray(rgb):
+            return np.dot(rgb[..., :3], [0.2989, 0.5870, 0.1140])
+
+        emap = abs(target_board_ABC - output_img)
+        axarr[3].imshow(rgb2gray(emap), cmap=plt.get_cmap("gray"))
+
+        for ax in axarr:
+            ax.set_axis_off()
+
+        fig.savefig(log_dir + "/img_eval.png")
+        plt.close(fig)
+
+        rmse = torch.sqrt(torch.cat(loss_vals, dim=0).mean())
+        print("rmse lensnet: ", rmse.item())
+
+
+    scheduler_type = "super"
+    if scheduler_type == "linear":
+        step_size = 20000  # 15000
+        final_ratio = 0.01  # 0.05
+        start_ratio = 0.15
+        duration_ratio = 0.6
+
+        def lambda_rule(ep):
+            lr_l = 1.0 - min(
+                1,
+                max(0, ep - start_ratio * step_size)
+                / float(duration_ratio * step_size),
+            ) * (1 - final_ratio)
+            return lr_l
+
+        scheduler = torch.optim.lr_scheduler.LambdaLR(
+            optimizer_train, lr_lambda=lambda_rule
+        )
+        LOGGER.info(
+            f"LR scheduler has step size {step_size}, final ratio {final_ratio}, start ratio {start_ratio}, duration ratio {duration_ratio}."
+        )
+    elif scheduler_type == "super":
+        step_size = 12000
+        max_lr = 1e-4
+        pct_start = 0.05
+        scheduler = torch.optim.lr_scheduler.OneCycleLR(
+            optimizer_train,
+            max_lr=max_lr,
+            total_steps=step_size,
+            pct_start=pct_start,
+        )
+        LOGGER.info(
+            f"LR scheduler has step size {step_size}, max lr {max_lr}, pct_start {pct_start}"
+        )
+
     LOGGER.info(f"Lens has {sum(p.numel() for p in lens_net.parameters())} parameters.")
+    writer = SummaryWriter(log_dir=log_dir)
+    LOGGER.info(f"Writing logs and tensorboard to `{log_dir}`.")
     LOGGER.info("Optimizing...")
-    rnge = tqdm.trange(300)
-    weights = {}
-    weights_normalizer = 1.0
-    p_ord = 1
-    weights_updated_every = 10
+    start_epoch = 0
+    if is_eval:
+        start_epoch = checkpoint["epoch"]
+    rnge = tqdm.trange(start_epoch, 500)
+
+
+    # load data
+    dense_matching = False
+    if dense_matching:
+        target_board_ABC = (
+            imageio.imread(path.join(storage_fp, "target.png"))[..., :3]
+            / 255.0
+        )
+        target_board_path = path.join(storage_fp, "target.png")
+        target_board = imageio.imread(target_board_path)[..., :3]
+        transform = transforms.ToTensor()
+        image = transform(target_board).unsqueeze(0).to(dev)
+        image_ABC = transform(target_board_ABC).unsqueeze(0).to(dev)
+        l1_loss = torch.nn.L1Loss()
+
     for epoch_idx in rnge:
         loss_vals = []
         loss_vals_train = []
-        for cam_idx, (cam, board_coord_mat, frame_coord_mat) in tqdm.tqdm(
+        loss_train = []
+
+        for _, (cam, board_coord_mat, frame_coord_mat) in tqdm.tqdm(
             enumerate(zip(cams_train, board_coords_train, frame_coords_train)),
             total=len(cams_train),
         ):
             optimizer_train.zero_grad()
             projected = cam.project_points(board_coord_mat)
-            if cam_idx not in weights:
-                weights[cam_idx] = torch.ones(
-                    (projected.shape[0], 1), dtype=torch.float32, device=dev
-                )
-            else:
-                if epoch_idx > 0 and epoch_idx % weights_updated_every == 0:
-                    norm_vals = torch.linalg.norm(
-                        projected - frame_coord_mat, dim=1, ord=abs(p_ord - 2)
-                    )
-                    if p_ord - 2 < 0:
-                        weights[cam_idx] = 1.0 / torch.maximum(
-                            torch.tensor(1e-5, dtype=torch.float32, device=dev),
-                            norm_vals,
-                        )
-                    else:
-                        weights[cam_idx] = norm_vals
-            weights_to_apply = (weights_normalizer * weights[cam_idx]).detach()
-            loss = (
-                weights_to_apply
-                * torch.linalg.norm(projected - frame_coord_mat, dim=1, ord=2)
-            ).sum()
+            loss = torch.linalg.norm(projected - frame_coord_mat, dim=1).mean()
             loss_vals_train.append(loss.item())
+
+            proj_error = torch.square(
+                torch.linalg.norm(projected - frame_coord_mat, dim=1)
+            )
+            loss_train.append(proj_error)
+
+            # dense match loss
+            if dense_matching:
+                camera_directions_w_lens = cam.project_lens()
+                flow = camera_directions_w_lens.unsqueeze(0) * scale
+                output = F.grid_sample(
+                    image[..., ::2, ::2],
+                    flow,
+                    mode="bilinear",
+                    padding_mode="zeros",
+                    align_corners=False,
+                )
+                dense_loss = l1_loss(image_ABC[..., ::2, ::2], output)
+
+                loss += dense_loss * 50
+
             loss.backward()
             optimizer_train.step()
-        # Recalculate weights normalizer.
-        if epoch_idx > weights_updated_every:
-            weights_normalizer = (
-                n_points_train
-                / torch.sum(torch.cat(list(weights.values()), dim=0))
-                * 100.0
-            )
-        print("weights_normalizer", weights_normalizer)
-        # Evaluate.
+            scheduler.step()
+
+        avg_loss = np.array(loss_vals_train).mean()
+        if dense_matching:
+            writer.add_scalar("dense_loss", dense_loss, epoch_idx)
+        writer.add_scalar("reproj_loss", avg_loss, epoch_idx)
+
         for cam_idx, (cam, board_coord_mat, frame_coord_mat) in enumerate(
             zip(cams_val, board_coords_val, frame_coords_val)
         ):
@@ -278,26 +374,132 @@ def cli(cfg: Config):
                 torch.from_numpy(frame_coord_mat).to(torch.float32).to(dev)
             )
             projected = cam.project_points(board_coord_mat)
-            loss = torch.square(
+            val_error = torch.square(
                 torch.linalg.norm(projected - frame_coord_mat, dim=1)
             )  # RMSE
-            loss_vals.append(loss.detach().clone())
-            weights_to_apply = 1.0 / torch.maximum(
-                torch.tensor(1e-5, dtype=torch.float32, device=dev),
-                torch.linalg.norm(projected - frame_coord_mat, dim=1, ord=1),
-            )
-            loss = (
-                weights_to_apply.detach()
-                * torch.linalg.norm(projected - frame_coord_mat, dim=1, ord=2)
-            ).sum()
+            loss_vals.append(val_error.detach().clone())
+  
+            loss = torch.linalg.norm(projected - frame_coord_mat, dim=1).mean()
+
+            # dense match loss
+            if dense_matching:
+                camera_directions_w_lens = cam.project_lens()
+                flow = camera_directions_w_lens.unsqueeze(0) * scale
+                output = F.grid_sample(
+                    image[..., ::2, ::2],
+                    flow,
+                    mode="bilinear",
+                    padding_mode="zeros",
+                    align_corners=False,
+                )
+                dense_loss = l1_loss(image_ABC[..., ::2, ::2], output)
+
+                loss += dense_loss * 50
+
             loss.backward()
             optimizer_val_RT.step()
+
+            if epoch_idx % 10 == 0 and cam_idx % 100 == 0 and dense_matching:
+
+                def rgb2gray(rgb):
+                    return np.dot(rgb[..., :3], [0.2989, 0.5870, 0.1140])
+
+                rows, cols = 1, 4
+                gridspec_kw = {"wspace": 0.0, "hspace": 0.0}
+                fig, axarr = plt.subplots(
+                    rows, cols, gridspec_kw=gridspec_kw, figsize=(12, 3)
+                )
+                bleed = 0
+                fig.subplots_adjust(
+                    left=bleed, bottom=bleed, right=(1 - bleed), top=(1 - bleed)
+                )
+
+                axarr[0].imshow(target_board)
+                output_img = output[0].permute(1, 2, 0).detach().cpu().numpy()
+                axarr[1].imshow(output_img)
+                axarr[2].imshow(target_board_ABC[::2, ::2, :])
+                emap = abs(target_board_ABC[::2, ::2, :] - output_img)
+                axarr[3].imshow(rgb2gray(emap), cmap=plt.get_cmap("gray"))
+                for ax in axarr:
+                    ax.set_axis_off()
+                fig.savefig(log_dir + f"/dense_match_{epoch_idx // 10}.png")
+
+                plt.close(fig)
+
         if epoch_idx % 10 == 0:
-            vis = vis_lens(cam)
-            imageio.imwrite("../../../%d.jpg" % (epoch_idx), vis)
-        rnge.set_description(
-            f"Loss: {np.mean(loss_vals_train)}, RMSE (val): {torch.sqrt(torch.cat(loss_vals, dim=0).mean())}"
-        )
+            # visualize keypoints
+
+            rows, cols = 3, 4
+            gridspec_kw = {"wspace": 0.0, "hspace": 0.0}
+            fig, axarr = plt.subplots(
+                rows, cols, gridspec_kw=gridspec_kw, figsize=(12, 9)
+            )
+            bleed = 0
+            fig.subplots_adjust(
+                left=bleed, bottom=bleed, right=(1 - bleed), top=(1 - bleed)
+            )
+            for cam_idx, (cam, board_coord_mat, frame_coord_mat, ax) in enumerate(
+                zip(cams_val, board_coords_val, frame_coords_val, axarr.ravel())
+            ):
+                board_coord_mat = (
+                    torch.from_numpy(board_coord_mat).to(torch.float32).to(dev)
+                )
+                frame_coord_mat = (
+                    torch.from_numpy(frame_coord_mat).to(torch.float32).to(dev)
+                )
+                projected = cam.project_points(board_coord_mat)
+                # vis, _ = vis_lens(cam)
+                # ax.imshow(vis[..., :3])
+                ax.scatter(
+                    frame_coord_mat.detach().cpu().numpy()[:, 0],
+                    frame_coord_mat.detach().cpu().numpy()[:, 1],
+                    marker="o",
+                    s=5,
+                )
+                ax.scatter(
+                    projected.detach().cpu().numpy()[:, 0],
+                    projected.detach().cpu().numpy()[:, 1],
+                    marker="o",
+                    s=5,
+                )
+                ax.set_axis_off()
+                ax.grid(False)
+                plt.tight_layout()
+            fig.savefig(log_dir + f"/vis_{epoch_idx // 10}.png")
+            vis, _ = vis_lens(cam)
+            writer.add_image(
+                "vis/lens", vis, global_step=epoch_idx, walltime=None, dataformats="HWC"
+            )
+            plt.close(fig)
+
+        train_rmse = torch.sqrt(torch.cat(loss_train, dim=0).mean())
+        writer.add_scalar("train_rmse", train_rmse.detach(), epoch_idx)
+        rmse = torch.sqrt(torch.cat(loss_vals, dim=0).mean())
+        writer.add_scalar("val_rmse", rmse, epoch_idx)
+        lr = optimizer_train.param_groups[0]["lr"]
+        writer.add_scalar("lr", lr, epoch_idx)
+        print(f"RMSE (train): {train_rmse}, RMSE (val): {rmse}, lr: {lr}")
+        if dense_matching:
+            print(
+                f"Epoch {epoch_idx}, reproj loss: {avg_loss}, dense loss: {dense_loss}"
+            )
+        else:
+            print(f"Epoch {epoch_idx}, reproj loss: {avg_loss}")
+
+        if epoch_idx > 0 and epoch_idx % 25 == 0 and not is_eval:
+            PATH = log_dir + "/lensnet_latest.pt"
+            torch.save(
+                {
+                    "epoch": epoch_idx,
+                    "model_state_dict": lens_net.state_dict(),
+                    "optimizer_state_dict": optimizer_train.state_dict(),
+                    "K": K,
+                    "RTs_train": RTs_train,
+                    "RTs_val": RTs_val,
+                    "loss": loss,
+                },
+                PATH,
+            )
 
 
 def colorize(uv_im, max_mag=None):
@@ -305,7 +507,7 @@ def colorize(uv_im, max_mag=None):
     hsv[..., 1] = 255
     mag, ang = cv2.cartToPolar(uv_im[..., 0], uv_im[..., 1])
     hsv[..., 0] = ang * 180 / np.pi / 2
-    print(mag.max())
+    # print(mag.max())
     if max_mag is None:
         hsv[..., 2] = cv2.normalize(mag, None, 0, 255, cv2.NORM_MINMAX)
     else:
@@ -314,6 +516,68 @@ def colorize(uv_im, max_mag=None):
         hsv[..., 2] = mag.astype(np.uint8)
     rgb = cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB)
     return rgb
+
+def image_grid_vis(
+    coords_x,
+    coords_y,
+    rows=None,
+    cols=None,
+    fill: bool = True,
+    show_axes: bool = False,
+    rgb: bool = True,
+):
+    """
+    A util function for plotting a grid of images.
+
+    Args:
+        images: (N, H, W, 4) array of RGBA images
+        rows: number of rows in the grid
+        cols: number of columns in the grid
+        fill: boolean indicating if the space between images should be filled
+        show_axes: boolean indicating if the axes of the plots should be visible
+        rgb: boolean, If True, only RGB channels are plotted.
+            If False, only the alpha channel is plotted.
+
+    Returns:
+        None
+    """
+    if (rows is None) != (cols is None):
+        raise ValueError("Specify either both rows and cols or neither.")
+
+    gridspec_kw = {"wspace": 0.0, "hspace": 0.0} if fill else {}
+    fig, axarr = plt.subplots(rows, cols, gridspec_kw=gridspec_kw, figsize=(15, 9))
+    bleed = 0
+    fig.subplots_adjust(left=bleed, bottom=bleed, right=(1 - bleed), top=(1 - bleed))
+
+    for ax, coord_x, coord_y in zip(axarr.ravel(), coords_x, coords_y):
+        ax.scatter(coord_x, coord_y, marker="o")
+        if not show_axes:
+            ax.set_axis_off()
+    plt.close(fig)
+
+
+def project_lens(camera: Camera):
+    i, j = np.meshgrid(
+        np.linspace(0, camera.resolution_w_h[0] - 1, camera.resolution_w_h[0]),
+        np.linspace(0, camera.resolution_w_h[1] - 1, camera.resolution_w_h[1]),
+        indexing="ij",
+    )
+    i = i.T
+    j = j.T
+    P_sensor = (
+        torch.from_numpy(np.stack((i, j), axis=-1))
+        .to(torch.float32)
+        .to(camera.K.device)
+    )
+    # camera_directions_w_lens = batched_func(
+    #     camera.get_rays_view, P_sensor.reshape((-1, 2)), 10000
+    # )
+    camera_directions_w_lens = camera.get_rays_view(P_sensor.reshape((-1, 2)))
+    camera_directions_w_lens = camera_directions_w_lens.reshape(
+        (P_sensor.shape[0], P_sensor.shape[1], 3)
+    )[:, :, :2]
+
+    return camera_directions_w_lens
 
 
 def vis_lens(camera: Camera):
@@ -336,8 +600,7 @@ def vis_lens(camera: Camera):
         camera_directions_w_lens = camera_directions_w_lens.reshape(
             (P_sensor.shape[0], P_sensor.shape[1], 3)
         )[:, :, :2]
-        # This camera does not need a lens and RT does not matter either since we're
-        # working in view space only.
+
         camera_no_lens = Camera(camera.resolution_w_h, camera.K)
         camera_directions_wo_lens = batched_func(
             camera_no_lens.get_rays_view, P_sensor.reshape((-1, 2)), 10000
@@ -347,10 +610,8 @@ def vis_lens(camera: Camera):
             direction_diff.detach().cpu().numpy(),
             max_mag=0.1,
         )
-        # flow_color = flow_vis.flow_to_color(
-        #     direction_diff.detach().cpu().numpy(), clip_flow=None, convert_to_bgr=False
-        # )
-    return flow_color
+      
+    return flow_color, camera_directions_w_lens
 
 
 if __name__ == "__main__":
