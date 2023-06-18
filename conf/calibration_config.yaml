@@ -1,0 +1,80 @@
+defaults:
+  # Do *not* change the order of these elements!
+  # They are not order agnostic and, for instance,
+  # _self_ must be called after `calibration_base_config`!
+  - calibration_base_config
+  - _self_
+  - override hydra/job_logging: colorlog
+  - override hydra/hydra_logging: colorlog
+model:
+  # Determined through hyperparameter search.
+  lr: 0.00005677  # 0.0005677
+  lr_fcn_fac: 0.4034
+  lr_marker_fac: 67.18
+  n_latent: 386
+  n_hidden: 1
+  # Try to max this out so that it still just fits
+  # into GPU memory.
+  # batch_size: 18
+  batch_size: 50
+  # You can use this if you want to regularize the
+  # amount of color used (for easier printing).
+  # You should set it no higher than 1e-5.
+  # Activating it should lead to a mostly white
+  # pattern.
+  reg_weight: 0.0
+  marker:
+    # The marker size is important and depends on
+    # the resolution of the camera(s) that should
+    # be calibrated, the distance of the pattern
+    # to the camera and the pattern size.
+    # The training of the detector
+    # and pattern makes sure that the detector is
+    # still very robust up to 1/2 of the pattern
+    # size within detections (for example: if the
+    # size here is set to 241, then it's very
+    # robust for pattern detections of size down
+    # to ~120 pixels after recording).
+    # The marker size (in pixels) should be what
+    # you expect the detection size to be. In the
+    # interest of accuracy, it should be larger,
+    # in the interest of a dense calibration target
+    # with a lot of points for the calibration, it
+    # should be smaller. Also, to not be too
+    # distorted by lense effects it should be smaller.
+    # Empirically, around 20 pixels seems to be a
+    # good size. You will have to make sure to
+    # create the calibration target (depending on
+    # the focal length of your camera and the
+    # intended distance to the camera during
+    # calibration) in a size that the marker will
+    # have this amount of pixels when seen from
+    # the camera. You can calculate that using the
+    # perspective projection formula p(px) = f(mm) * x(mm) / z(mm) / pxs (mm/px)
+    # <=> x = p * z * pxs / f, with x being the
+    # ideal marker size in mm.
+    size: 21
+    # The working size should be between factor 4
+    # and 8 larger than the original size.
+    working_size: 105
+  image_formation:
+    # print_dist:
+    #   p: 1.0
+    #   kernel_size: 
+    #     - 31
+    #     - 31
+    #   sigma:
+    #     - 16.0
+    #     - 16.0
+    motion_dist:
+      p: 0.2  # 0.2
+      kernel_size: 3
+    affine_dist:
+      p: 1.0
+    blur_dist:
+      p: 0.0
+    color_dist:
+      p: 1.0
+    noise_dist:
+      p: 1.0
+    working_size: ${model.marker.working_size}

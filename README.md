@@ -22,12 +22,12 @@ This is a PyTorch implementation provides tools for keypoint detection, dataset 
 
 ## Requirements
 
-To use the Neural Lens Modeling implementation, you need Python (version 3.7 or higher) and the following dependencies:
+To use the Neural Lens Modeling implementation, you need Python (version 3.7 or higher). Python environment including the required dependencies. This requires an NVIDIA GPU and a CUDA installation with version 11.1 - 11.3.
 
 You can install the required Python packages using pip:
 
 ```
-pip install torch opencv-python numpy matplotlib
+pip install -r requirements.txt
 ```
 
 ## Installation
@@ -42,11 +42,10 @@ git clone https://github.com/wxian3/neuroLens.git
 
 To generate a dataset for training the neural networks, follow these steps:
 
-1. Prepare a keypoint pattern that will be used as input.
+1. Prepare a keypoint pattern as input and render it on each view.
 2. Apply lens distortion effects to the target markers using various lens parameters.
 3. Save the distorted images along with the corresponding lens parameters (e.g., lens distortion, focal distance, aperture diameter) in JSON.
 
-The dataset generation process requires the keypoint detection module to accurately estimate the distortion parameters.
 ```
 cd SynLens
 python import_lenses.py --input_path path_to_target
@@ -54,7 +53,7 @@ python import_lenses.py --input_path path_to_target
 
 ## Optimizing NeuroLens for Calibration
 
-To train the neural networks using the generated dataset, follow these steps:
+To train the neural networks using the generated or captured dataset, follow these steps:
 
 1. Load the sequence of distorted images and keypoint correspondences from JSON files.
 2. Split the dataset into training and validation sets.
@@ -69,8 +68,9 @@ Refer to the provided training scripts and network architectures in the implemen
 ## Keypoint Detection and Marker Optimization
 ```
 cd calibration
+python scripts/optimize_marker.py
+
 python keypoint_detection.py --input_path path_to_input_images --output_path path_to_output
-python scripts/optimize_marker.py --output_path path_to_output
 ```
 This command will process the input image and output keypoint detection results (correspondences in JSON). The resulting output will be saved at the specified output path.
 

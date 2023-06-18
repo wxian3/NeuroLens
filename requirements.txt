@@ -1,0 +1,15 @@
+pytorch-lightning>=1.5.7
+pytorch3d==0.5.0
+hydra-colorlog>=1.1.0
+kornia>=0.6.2
+pdbpp>=0.10.3
+ray[tune]>=1.9.2
+opencv-python==4.5.5.62
+opencv-contrib-python==4.5.5.62
+natsort>=8.0.2
+reportlab>=3.6.6
+imageio>=2.14.1
+FrEIA @ git+https://github.com/VLL-HD/FrEIA.git
+panda3d==1.10.10
+toolz>=0.11.2
+flow-vis>=0.1
